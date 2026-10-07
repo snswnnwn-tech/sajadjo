@@ -14,7 +14,7 @@ from datetime import datetime
 # ============================================================
 #                    ⚙️ الإعدادات
 # ============================================================
-API_KEY = "6198804155:AAHZ-hZ1UM_KI_B8gahXGdx1PbaDpRqu53o"
+API_KEY = "6198804155:AAF5Zj-co6guQ6s2bW5hMTvFga8CFRi0WqA"
 ADMIN   = 5952132218
 
 MAX_FILE_SIZE_MB = 50
