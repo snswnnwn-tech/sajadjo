@@ -1,13 +1,15 @@
 # -*- coding: utf-8 -*-
 """
 بوت تلجرام - تحميل تيك توك بدون علامة مائية
-يعمل على Pydroid 3 / Termux / VPS
+مع نظام تدوير IP (بروكسي مجاني)
 """
 
 import os
 import re
 import json
 import time
+import random
+import threading
 import requests
 from datetime import datetime
 
@@ -29,11 +31,77 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 API_URL = f"https://api.telegram.org/bot{API_KEY}"
 last_update_id = 0
 
-print("=" * 50)
-print("🤖 بوت تلجرام - بدون علامة مائية")
-print(f"👤 الأدمن: {ADMIN}")
-print(f"📏 الحد الأقصى: {MAX_FILE_SIZE_MB} MB")
-print("=" * 50)
+# ============================================================
+#          🌐 نظام إدارة البروكسي (IP Rotation)
+# ============================================================
+proxies_pool = []  # قائمة البروكسيات النشطة
+proxies_lock = threading.Lock()
+
+
+def load_proxies():
+    """جلب قائمة بروكسيات جديدة من مصادر موثوقة"""
+    global proxies_pool
+    sources = [
+        "https://raw.githubusercontent.com/stormsia/proxy-list/main/http.txt",
+        "https://raw.githubusercontent.com/sakha1370/OpenRay/refs/heads/main/output/all_valid_proxies.txt",
+    ]
+    new_proxies = set()
+    print("🔄 جاري جلب قوائم البروكسي...")
+
+    for url in sources:
+        try:
+            r = requests.get(url, timeout=15)
+            if r.status_code == 200:
+                lines = r.text.strip().split("\n")
+                for line in lines:
+                    line = line.strip()
+                    if line and ":" in line:
+                        new_proxies.add(line)
+            print(f"   ✅ تم جلب {len(new_proxies)} بروكسي من {url.split('/')[-1]}")
+        except Exception as e:
+            print(f"   ❌ فشل جلب من {url}: {e}")
+
+    if not new_proxies:
+        print("⚠️ لم يتم جلب أي بروكسي جديد. سيتم استخدام القائمة القديمة إن وجدت.")
+        return
+
+    # اختبار البروكسيات الجديدة
+    valid_proxies = []
+    print(f"🔍 جاري اختبار {len(new_proxies)} بروكسي...")
+    for proxy in list(new_proxies)[:50]:  # اختبر أول 50 لتوفير الوقت
+        proxy_url = f"http://{proxy}"
+        try:
+            r = requests.get("https://api.ipify.org", proxies={"http": proxy_url, "https": proxy_url}, timeout=5)
+            if r.status_code == 200:
+                valid_proxies.append(proxy)
+                if len(valid_proxies) >= 20:  # احتفظ بأول 20 بروكسي يعمل
+                    break
+        except:
+            continue
+
+    with proxies_lock:
+        proxies_pool = valid_proxies
+
+    print(f"✅ تم العثور على {len(proxies_pool)} بروكسي صالح للعمل.")
+
+
+def get_random_proxy():
+    """إرجاع بروكسي عشوائي من القائمة النشطة"""
+    with proxies_lock:
+        if not proxies_pool:
+            return None
+        return random.choice(proxies_pool)
+
+
+def start_proxy_updater():
+    """تشغيل محدث البروكسي في خيط منفصل"""
+    def updater():
+        while True:
+            load_proxies()
+            time.sleep(1800)  # تحديث كل 30 دقيقة
+
+    thread = threading.Thread(target=updater, daemon=True)
+    thread.start()
 
 
 # ============================================================
@@ -98,101 +166,99 @@ def bot(method, data=None, files=None):
 
 
 # ============================================================
-#      🎵 تحميل تيك توك - بدون علامة مائية أولاً
+#      🎵 تحميل تيك توك - مع تدوير البروكسي
 # ============================================================
 def tik_no_watermark(query, from_id):
     """
     تحميل بأولوية: بدون علامة مائية أولاً
-    1) tikwm.com (no watermark)
-    2) tikwm.com (hd)
-    3) yt-dlp كاحتياطي
+    مع محاولة استخدام بروكسي مختلف في كل مرة
     """
 
-    # ====== 1) tikwm - بدون علامة مائية ======
+    # المحاولة الأولى: باستخدام بروكسي
+    proxy = get_random_proxy()
+    proxies_dict = None
+    if proxy:
+        proxies_dict = {"http": f"http://{proxy}", "https": f"http://{proxy}"}
+        print(f"🌐 استخدام البروكسي: {proxy}")
+    else:
+        print("⚠️ لا يوجد بروكسي متاح، سيتم المحاولة بدون بروكسي.")
+
+    UA = "Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+
+    # ====== المحاولة 1: tikwm.com ======
     try:
-        print("🔄 tikwm (بدون علامة)...")
+        print("🔄 [1] tikwm...")
         r = requests.get(
             "https://www.tikwm.com/api/",
             params={"url": query, "hd": 0},
-            headers={"User-Agent": "Mozilla/5.0"},
+            headers={"User-Agent": UA},
+            proxies=proxies_dict,
             timeout=30,
         )
         data = r.json()
         if data.get("code") == 0 and data.get("data"):
             d = data["data"]
             url = "https://www.tikwm.com" + d.get("play", "")
-            print(f"⬇️ تحميل بدون علامة: {url[:70]}...")
-
-            tmp = os.path.join(TEMP_DIR, f"{from_id}_nowm.mp4")
-            r2 = requests.get(url, timeout=300,
-                              headers={"User-Agent": "Mozilla/5.0"},
-                              stream=True)
+            tmp = os.path.join(TEMP_DIR, f"{from_id}_tikwm.mp4")
+            r2 = requests.get(url, timeout=300, headers={"User-Agent": UA},
+                              proxies=proxies_dict, stream=True)
             with open(tmp, "wb") as f:
                 for chunk in r2.iter_content(chunk_size=65536):
                     if chunk:
                         f.write(chunk)
-
-            size_mb = os.path.getsize(tmp) / (1024 * 1024)
-            print(f"✅ تم التحميل بدون علامة: {size_mb:.2f} MB")
-
-            return {
-                "source": "tikwm-بدون علامة",
-                "title": d.get("title", ""),
-                "author": d.get("author", {}).get("unique_id", ""),
-                "author_name": d.get("author", {}).get("nickname", ""),
-                "duration": d.get("duration", 0),
-                "resolution": f"{d.get('width', '?')}x{d.get('height', '?')}",
-                "file_path": tmp,
-                "size_mb": size_mb,
-                "has_watermark": False,
-            }
+            if os.path.getsize(tmp) > 5000:
+                print(f"✅ tikwm نجح!")
+                return {
+                    "source": "tikwm",
+                    "title": d.get("title", ""),
+                    "author": d.get("author", {}).get("unique_id", ""),
+                    "author_name": d.get("author", {}).get("nickname", ""),
+                    "duration": d.get("duration", 0),
+                    "resolution": f"{d.get('width', '?')}x{d.get('height', '?')}",
+                    "file_path": tmp,
+                    "size_mb": os.path.getsize(tmp) / (1024 * 1024),
+                    "has_watermark": False,
+                }
     except Exception as e:
-        print(f"❌ tikwm nowm failed: {e}")
+        print(f"❌ tikwm: {e}")
 
-    # ====== 2) tikwm - HD ======
+    # ====== المحاولة 2: tiklydown ======
     try:
-        print("🔄 tikwm (HD)...")
-        r = requests.get(
-            "https://www.tikwm.com/api/",
-            params={"url": query, "hd": 1},
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=30,
-        )
+        print("🔄 [2] tiklydown...")
+        r = requests.get("https://api.tiklydown.eu.org/api/download",
+                         params={"url": query},
+                         headers={"User-Agent": UA},
+                         proxies=proxies_dict,
+                         timeout=30)
         data = r.json()
-        if data.get("code") == 0 and data.get("data"):
-            d = data["data"]
-            url = "https://www.tikwm.com" + (d.get("hdplay") or d.get("play", ""))
-            print(f"⬇️ تحميل HD: {url[:70]}...")
-
-            tmp = os.path.join(TEMP_DIR, f"{from_id}_hd.mp4")
-            r2 = requests.get(url, timeout=300,
-                              headers={"User-Agent": "Mozilla/5.0"},
-                              stream=True)
+        if data.get("video") and data["video"].get("noWatermark"):
+            url = data["video"]["noWatermark"]
+            tmp = os.path.join(TEMP_DIR, f"{from_id}_tikly.mp4")
+            r2 = requests.get(url, timeout=300, headers={"User-Agent": UA},
+                              proxies=proxies_dict, stream=True)
             with open(tmp, "wb") as f:
                 for chunk in r2.iter_content(chunk_size=65536):
                     if chunk:
                         f.write(chunk)
-
-            size_mb = os.path.getsize(tmp) / (1024 * 1024)
-            print(f"✅ تم التحميل HD: {size_mb:.2f} MB")
-
-            return {
-                "source": "tikwm-HD",
-                "title": d.get("title", ""),
-                "author": d.get("author", {}).get("unique_id", ""),
-                "author_name": d.get("author", {}).get("nickname", ""),
-                "duration": d.get("duration", 0),
-                "resolution": f"{d.get('width', '?')}x{d.get('height', '?')}",
-                "file_path": tmp,
-                "size_mb": size_mb,
-                "has_watermark": False,
-            }
+            if os.path.getsize(tmp) > 5000:
+                print(f"✅ tiklydown نجح!")
+                return {
+                    "source": "tiklydown",
+                    "title": data.get("title", ""),
+                    "author": "",
+                    "author_name": "",
+                    "duration": 0,
+                    "resolution": "غير معروف",
+                    "file_path": tmp,
+                    "size_mb": os.path.getsize(tmp) / (1024 * 1024),
+                    "has_watermark": False,
+                }
     except Exception as e:
-        print(f"❌ tikwm HD failed: {e}")
+        print(f"❌ tiklydown: {e}")
 
-    # ====== 3) yt-dlp (احتياطي - قد يحتوي علامة) ======
+    # ====== المحاولة 3: yt-dlp ======
     try:
-        print("🔄 yt-dlp (احتياطي)...")
+        print("🔄 [3] yt-dlp...")
         import yt_dlp
 
         output_template = os.path.join(TEMP_DIR, f"{from_id}_%(id)s.%(ext)s")
@@ -204,22 +270,20 @@ def tik_no_watermark(query, from_id):
             "noplaylist": True,
             "no_check_certificate": True,
         }
+        if proxy:
+            ydl_opts["proxy"] = f"http://{proxy}"
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(query, download=True)
             file_path = ydl.prepare_filename(info)
-
             video_id = info.get("id", "")
             if not os.path.exists(file_path):
                 for f in os.listdir(TEMP_DIR):
                     if video_id in f and f.endswith((".mp4", ".webm")):
                         file_path = os.path.join(TEMP_DIR, f)
                         break
-
-            if os.path.exists(file_path):
-                size_mb = os.path.getsize(file_path) / (1024 * 1024)
-                print(f"✅ yt-dlp: {size_mb:.2f} MB")
-
+            if os.path.exists(file_path) and os.path.getsize(file_path) > 5000:
+                print(f"✅ yt-dlp نجح!")
                 return {
                     "source": "yt-dlp",
                     "title": info.get("title", ""),
@@ -228,11 +292,11 @@ def tik_no_watermark(query, from_id):
                     "duration": info.get("duration", 0),
                     "resolution": f"{info.get('width', '?')}x{info.get('height', '?')}",
                     "file_path": file_path,
-                    "size_mb": size_mb,
+                    "size_mb": os.path.getsize(file_path) / (1024 * 1024),
                     "has_watermark": True,
                 }
     except Exception as e:
-        print(f"❌ yt-dlp failed: {e}")
+        print(f"❌ yt-dlp: {e}")
 
     return None
 
@@ -312,623 +376,10 @@ def handle_update(update):
     if not message and not callback:
         return
 
-    # الحالات
-    msg_on      = read_file("msg.php")
-    forward_on  = read_file("forward.php")
-    midea_on    = read_file("midea.php")
-    inlin_on    = read_file("inlin.php")
-    photoi_on   = read_file("photoi.php")
-    upq_on      = read_file("up.php")
-    skor        = read_file("skor.php") or "معطل ⚠️"
-    ont         = read_file("ont.php")
-    bot_status  = read_file("bot.txt")
-    channel     = read_file("link.php")
-    link_state  = read_file("link2.php")
-    uuser       = read_file("uuser.php")
-    k088        = read_file("data/k088.txt")
-    q1          = read_file("data/q1.txt")
-
-    # الاشتراك الإجباري
-    if message and skor == "مفعل ✅":
-        if channel and channel != "on" and not is_member(channel, from_id):
-            bot("sendMessage", {
-                "chat_id": chat_id,
-                "text": ("»  عليك الاشتراك في قناة تحديثات البوت اولا 📨\n"
-                         "»  ليمكنك استخدام البوت  🔊\n"
-                         "»  اشترك ثم ارسل { /start }\n"
-                         f"»  [اضغط هنا للشتراك]({link_state})"),
-                "parse_mode": "MarkDown",
-                "disable_web_page_preview": True,
-            })
-            return
-        if uuser and uuser != "on" and uuser.strip() and not is_member(uuser.strip(), from_id):
-            bot("sendMessage", {
-                "chat_id": chat_id,
-                "text": ("»  عليك الاشتراك في قناة تحديثات البوت اولا 📨\n"
-                         "»  ليمكنك استخدام البوت  🔊\n"
-                         "»  اشترك ثم ارسل { /start }\n"
-                         f"»  {uuser}"),
-            })
-            return
-
-    # الأعضاء
-    users_raw = read_file("abbas.json")
-    users = [u.strip() for u in users_raw.split("\n") if u.strip()]
-    if message and str(from_id) not in users:
-        append_file("abbas.json", f"{from_id}\n")
-        users.append(str(from_id))
-    all_users = max(len(users), 0)
-
-    # إحصائيات
-    try:
-        stats = json.loads(read_file("abbas09.json", "{}"))
-    except:
-        stats = {}
-    stats.setdefault("sudoarr", [])
-    stats.setdefault("addmessage", 0)
-    stats.setdefault("messagee", 0)
-
-    if message:
-        if from_id == ADMIN:
-            stats["addmessage"] = stats.get("addmessage", 0) + 1
-        else:
-            stats["messagee"] = stats.get("messagee", 0) + 1
-        write_file("abbas09.json", json.dumps(stats, ensure_ascii=False))
-
-    xll = stats.get("addmessage", 0) + stats.get("messagee", 0)
-
-    # الأدمنية
-    adminss_raw = read_file("ad.json")
-    adminss = [a.strip() for a in adminss_raw.split("\n") if a.strip()]
-    if str(ADMIN) not in adminss:
-        append_file("ad.json", f"{ADMIN}\n")
-        adminss.append(str(ADMIN))
-    is_admin = str(from_id) in adminss
-
-    # اليوم
-    d = datetime.now().strftime("%a")
-    day_file = f"{d}.txt"
-    day_raw = read_file(day_file)
-    day = [x.strip() for x in day_raw.split("\n") if x.strip()]
-    todayuser = len(day)
-    if message and str(from_id) not in day:
-        append_file(day_file, f"{from_id}\n")
-
-    user_at = f"@{user}" if user else "بلا معرف"
-
-    # دخول جديد
-    if text == "/start" and str(from_id) not in [u for u in users[:-1]]:
-        bot("sendMessage", {
-            "chat_id": ADMIN,
-            "text": ("٭ تم دخول شخص جديد الى البوت الخاص بك 👾\n\n"
-                     "• معلومات العضو الجديد .\n"
-                     "                 •--•\n"
-                     f"• الاسم : {name}\n"
-                     f"• المعرف : {user_at}\n"
-                     f"• الايدي : {from_id}\n"
-                     "                  •--•\n"
-                     f"• عدد الاعضاء الكلي : {all_users}\n"),
-        })
-
-    # /start للأدمن
-    if text == "/start" and is_admin:
-        bot("sendMessage", {
-            "chat_id": chat_id,
-            "text": ADMIN_PANEL_TEXT,
-            "parse_mode": "Markdown",
-            "reply_markup": build_admin_panel(skor),
-        })
-
-    # قسم الأدمن
-    if data == "lIllabbas" and is_admin:
-        bot("editMessageText", {
-            "chat_id": chat_id2, "message_id": message_id,
-            "text": "اهلا",
-            "parse_mode": "Markdown",
-            "reply_markup": json.dumps({
-                "inline_keyboard": [
-                    [{"text": "- رفع ادمن.", "callback_data": "adl"}],
-                    [{"text": "- اخر الادمن.", "callback_data": "addmin"}],
-                    [{"text": "- حذف الادمنيه.", "callback_data": "delateaddmin"}],
-                ]
-            }, ensure_ascii=False),
-        })
-
-    if data == "adl" and is_admin:
-        bot("editMessageText", {
-            "chat_id": chat_id2, "message_id": message_id,
-            "text": "قم بارسال ايدي العضو",
-        })
-        write_file("data/k088.txt", "k088")
-
-    if text and text != "/start" and k088 == "k088" and is_admin:
-        write_file("data/k088.txt", "none")
-        if text not in adminss:
-            append_file("ad.json", f"{text}\n")
-            bot("sendMessage", {"chat_id": chat_id, "text": "تم رفع العضو"})
-            bot("sendMessage", {"chat_id": text, "text": "تم رفعك ادمن في البوت"})
-        else:
-            bot("sendMessage", {"chat_id": chat_id, "text": "العضو ادمن بالفعل"})
-
-    if data == "addmin" and is_admin:
-        lines = []
-        for i in range(5):
-            idx = len(adminss) - 2 - i
-            val = adminss[idx] if idx >= 0 else "-"
-            lines.append(f" {i+1} - ️{val}")
-        bot("editMessageText", {
-            "chat_id": chat_id2, "message_id": message_id,
-            "text": "اخر خمس ادمنيه :\n" + "\n".join(lines),
-            "parse_mode": "Markdown",
-            "reply_markup": json.dumps({
-                "inline_keyboard": [
-                    [{"text": "- الصفحه الرئيسيه.", "callback_data": "bak"}]
-                ]
-            }),
-        })
-
-    if data == "delateaddmin" and is_admin:
-        bot("editMessageText", {
-            "chat_id": chat_id2, "message_id": message_id,
-            "text": "هل انت متاكد من الحذف",
-            "parse_mode": "MarkDown",
-            "reply_markup": json.dumps({
-                "inline_keyboard": [
-                    [{"text": "لا", "callback_data": "bak"}],
-                    [{"text": "نعم", "callback_data": "yesaarsslan"}],
-                ]
-            }, ensure_ascii=False),
-        })
-
-    if data == "yesaarsslan" and is_admin:
-        bot("editMessageText", {
-            "chat_id": chat_id2, "message_id": message_id,
-            "text": "تم حذف الادمنيه",
-            "parse_mode": "MarkDown",
-            "reply_markup": json.dumps({
-                "inline_keyboard": [
-                    [{"text": "الصفحه الرئيسيه", "callback_data": "bak"}]
-                ]
-            }, ensure_ascii=False),
-        })
-        write_file("ad.json", f"{ADMIN}\n")
-
-    if data == "abcde" and is_admin:
-        bot("editMessageText", {
-            "chat_id": chat_id2, "message_id": message_id,
-            "text": "- اهلا بك مطوري الشهير \n- تم فتح البوت \n- /start",
-            "parse_mode": "MarkDown",
-            "reply_markup": json.dumps({
-                "inline_keyboard": [
-                    [{"text": "الصفحه الرئيسيه", "callback_data": "bak"}]
-                ]
-            }, ensure_ascii=False),
-        })
-        write_file("bot.txt", "مفتوح")
-
-    if data == "abcd" and is_admin:
-        bot("editMessageText", {
-            "chat_id": chat_id2, "message_id": message_id,
-            "text": "- اهلا بك مطوري الشهير \n- تم قفل البوت\n- /start ",
-            "parse_mode": "MarkDown",
-            "reply_markup": json.dumps({
-                "inline_keyboard": [
-                    [{"text": "الصفحه الرئيسيه", "callback_data": "bak"}]
-                ]
-            }, ensure_ascii=False),
-        })
-        write_file("bot.txt", "متوقف")
-
-    if text == "/start" and bot_status == "متوقف" and str(chat_id) != str(ADMIN):
-        bot("sendMessage", {"chat_id": chat_id, "text": "عذرا البوت يخضع للتحديث الان"})
-        return
-
-    if data == "userd" and is_admin:
-        bot("editMessageText", {
-            "chat_id": chat_id2, "message_id": message_id,
-            "text": f" اهلا بك مطوري الشهير  الادمن\n عدد الاعضاء : ( {all_users} )",
-            "parse_mode": "MarkDown",
-            "reply_markup": json.dumps({
-                "inline_keyboard": [
-                    [{"text": "الصفحه الرئيسيه", "callback_data": "bak"}]
-                ]
-            }, ensure_ascii=False),
-        })
-
-    if data == "ont" and is_admin:
-        write_file("ont.php", "on")
-        bot("answerCallbackQuery", {
-            "callback_query_id": callback.get("id"),
-            "text": "مرحبا مطوري الشهير \n تم تفعيل الاشعارات في البوت\n➖➖➖➖➖➖➖➖",
-            "show_alert": True,
-        })
-
-    if data == "oft" and is_admin:
-        write_file("ont.php", "off")
-        bot("answerCallbackQuery", {
-            "callback_query_id": callback.get("id"),
-            "text": "مرحبا مطوري الشهير \n⚠ تم تعطيل الاشعارات في البوت\n➖➖➖➖➖➖➖➖",
-            "show_alert": True,
-        })
-
-    if ont == "on" and from_id != ADMIN and message:
-        bot("forwardMessage", {
-            "chat_id": ADMIN, "from_chat_id": chat_id, "message_id": message_id,
-        })
-
-    # الإذاعة
-    if data == "for" and is_admin:
-        bot("editMessageText", {
-            "chat_id": chat_id2, "message_id": message_id,
-            "text": "حسنا مطوري الشهير \n قم باختيار ما يناسبك",
-            "reply_markup": json.dumps({
-                "inline_keyboard": [
-                    [{"text": "اذاعه صورة", "callback_data": "photoi"}],
-                    [{"text": "اذاعه رسالة", "callback_data": "msg"},
-                     {"text": "اذاعه توجيه", "callback_data": "forward"}],
-                    [{"text": "اذاعه ميديا", "callback_data": "midea"},
-                     {"text": "اذاعه انلاين", "callback_data": "inline"}],
-                    [{"text": "رجوع", "callback_data": "bak"}],
-                ]
-            }, ensure_ascii=False),
-        })
-
-    if data == "msg" and is_admin:
-        write_file("msg.php", "on")
-        bot("editMessageText", {
-            "chat_id": chat_id2, "message_id": message_id,
-            "text": "حسنا مطوري الشهير \n قم بأرسال رسالتك لتحويلها لجميع المشتركين",
-            "reply_markup": json.dumps({
-                "inline_keyboard": [[{"text": "الغاء", "callback_data": "bak"}]]
-            }, ensure_ascii=False),
-        })
-
-    if msg_on == "on" and message and text and is_admin:
-        sent = 0
-        for u in users:
-            res = bot("sendMessage", {"chat_id": u, "text": text})
-            if res.get("ok"): sent += 1
-        bot("sendMessage", {
-            "chat_id": chat_id,
-            "text": f"حسنا مطوري الشهير \n تم عمل اذاعه بنجاح\n الى ( {sent} ) مشترك",
-            "reply_markup": json.dumps({
-                "inline_keyboard": [[{"text": "رجوع", "callback_data": "bak"}]]
-            }, ensure_ascii=False),
-        })
-        delete_file("msg.php")
-
-    if data == "forward" and is_admin:
-        write_file("forward.php", "on")
-        bot("editMessageText", {
-            "chat_id": chat_id2, "message_id": message_id,
-            "text": "حسنا مطوري الشهير \n ارسل الرسالة لتحويلها توجيهاً",
-            "reply_markup": json.dumps({
-                "inline_keyboard": [[{"text": "الغاء", "callback_data": "bak"}]]
-            }, ensure_ascii=False),
-        })
-
-    if forward_on == "on" and message and is_admin:
-        sent = 0
-        for u in users:
-            res = bot("forwardMessage", {
-                "chat_id": u, "from_chat_id": chat_id, "message_id": message_id,
-            })
-            if res.get("ok"): sent += 1
-        bot("sendMessage", {
-            "chat_id": chat_id,
-            "text": f"حسنا مطوري الشهير \n تم عمل اذاعه توجيه بنجاح\n الى ( {sent} ) مشترك",
-            "reply_markup": json.dumps({
-                "inline_keyboard": [[{"text": "رجوع", "callback_data": "bak"}]]
-            }, ensure_ascii=False),
-        })
-        delete_file("forward.php")
-
-    if data == "midea" and is_admin:
-        write_file("midea.php", "on")
-        bot("editMessageText", {
-            "chat_id": chat_id2, "message_id": message_id,
-            "text": ("حسنا مطوري الشهير \n أرسل الميديا (ماعدى الصورة)\n"
-                     "(ملصق - فيديو - بصمه - ملف صوتي - ملف - متحركه)"),
-            "reply_markup": json.dumps({
-                "inline_keyboard": [[{"text": "الغاء", "callback_data": "bak"}]]
-            }, ensure_ascii=False),
-        })
-
-    if midea_on == "on" and message and is_admin:
-        media_types = {
-            "voice": "sendVoice", "audio": "sendAudio", "video": "sendVideo",
-            "document": "sendDocument", "sticker": "sendSticker",
-        }
-        for key, method in media_types.items():
-            if key in message:
-                val = message[key]
-                if isinstance(val, list): val = val[0]
-                file_id = val.get("file_id")
-                for u in users:
-                    payload = {"chat_id": u, key: file_id}
-                    if message.get("caption"):
-                        payload["caption"] = message["caption"]
-                    bot(method, payload)
-                delete_file("midea.php")
-                bot("sendMessage", {
-                    "chat_id": chat_id,
-                    "text": f"تم نشر الميديا بنجاح إلى ({all_users}) مشترك",
-                })
-                break
-
-    if data == "photoi" and is_admin:
-        write_file("photoi.php", "on")
-        bot("editMessageText", {
-            "chat_id": chat_id2, "message_id": message_id,
-            "text": "حسنا مطوري الشهير \n قم بأرسال الصورة",
-            "reply_markup": json.dumps({
-                "inline_keyboard": [[{"text": "الغاء", "callback_data": "bak"}]]
-            }, ensure_ascii=False),
-        })
-
-    if photoi_on == "on" and message and message.get("photo") and is_admin:
-        file_id = message["photo"][-1]["file_id"]
-        for u in users:
-            payload = {"chat_id": u, "photo": file_id}
-            if message.get("caption"):
-                payload["caption"] = message["caption"]
-            bot("sendPhoto", payload)
-        bot("sendMessage", {
-            "chat_id": chat_id,
-            "text": f" مطوري الشهير \n تم نشر الصورة بنجاح\n الى ( {all_users} ) مشترك",
-            "reply_markup": json.dumps({
-                "inline_keyboard": [[{"text": "رجوع", "callback_data": "bak"}]]
-            }, ensure_ascii=False),
-        })
-        delete_file("photoi.php")
-
-    if data == "inline" and is_admin:
-        write_file("inlin.php", "on")
-        bot("editMessageText", {
-            "chat_id": chat_id2, "message_id": message_id,
-            "text": "حسنا مطوري الشهير \n قم بتوجيه نص الانلاين",
-            "reply_markup": json.dumps({
-                "inline_keyboard": [[{"text": "الغاء", "callback_data": "bak"}]]
-            }, ensure_ascii=False),
-        })
-
-    if inlin_on == "on" and message and is_admin and (
-            message.get("forward_from") or message.get("forward_from_chat")):
-        for u in users:
-            bot("forwardMessage", {
-                "chat_id": u, "from_chat_id": chat_id, "message_id": message_id,
-            })
-        bot("sendMessage", {
-            "chat_id": chat_id,
-            "text": f"حسنا مطوري الشهير \n تم نشر الانلاين بنجاح\n الى ( {all_users} ) مشترك",
-            "reply_markup": json.dumps({
-                "inline_keyboard": [[{"text": "رجوع", "callback_data": "bak"}]]
-            }, ensure_ascii=False),
-        })
-        delete_file("inlin.php")
-
-    # الاشتراك
-    if data == "channel" and is_admin:
-        bot("editMessageText", {
-            "chat_id": chat_id2, "message_id": message_id,
-            "text": "حسنا مطوري الشهير \n قم بتحديد الامر لأتمكن من تنفيذه",
-            "reply_markup": json.dumps({
-                "inline_keyboard": [
-                    [{"text": "قناة خاصة", "callback_data": "link"}],
-                    [{"text": "قناة عامة", "callback_data": "user"}],
-                    [{"text": "رجوع", "callback_data": "bak"}],
-                ]
-            }, ensure_ascii=False),
-        })
-
-    if data == "link" and is_admin:
-        write_file("link.php", "on")
-        bot("editMessageText", {
-            "chat_id": chat_id2, "message_id": message_id,
-            "text": ("حسنا مطوري الشهير \n ارفع البوت ادمن في القناة\n"
-                     " ثم ارسل توجيه من القناة الى هنا"),
-            "reply_markup": json.dumps({
-                "inline_keyboard": [[{"text": "رجوع", "callback_data": "bak"}]]
-            }, ensure_ascii=False),
-        })
-
-    if channel == "on" and message and message.get("forward_from_chat"):
-        ch_id = message["forward_from_chat"]["id"]
-        bot("sendMessage", {
-            "chat_id": chat_id,
-            "text": "حسنا مطوري الشهير \n قم الان بأرسال رابط القناة هنا",
-        })
-        write_file("link.php", str(ch_id))
-        write_file("link2.php", "on")
-
-    if link_state == "on" and message and text and is_admin:
-        pattern = re.compile(r"(https?://|t\.me|telegram\.me|telesco\.me)", re.IGNORECASE)
-        if pattern.search(text):
-            bot("sendMessage", {
-                "chat_id": chat_id,
-                "text": "حسنا مطوري الشهير \n تم تفعيل الاشتراك بنجاح",
-                "reply_markup": json.dumps({
-                    "inline_keyboard": [[{"text": "اتمام العملية", "callback_data": "bak"}]]
-                }, ensure_ascii=False),
-            })
-            write_file("link2.php", text)
-            write_file("skor.php", "مفعل ✅")
-        else:
-            bot("sendMessage", {
-                "chat_id": chat_id,
-                "text": "عذرا مطوري الشهير \n قم بأرسال الرابط بصورة صحيحه",
-            })
-
-    if data == "user" and is_admin:
-        bot("editMessageText", {
-            "chat_id": chat_id2, "message_id": message_id,
-            "text": ("حسنا مطوري الشهير \n ارفع البوت ادمن\n"
-                     " ثم ارسل يوزر القناة"),
-            "reply_markup": json.dumps({
-                "inline_keyboard": [[{"text": "رجوع", "callback_data": "bak"}]]
-            }, ensure_ascii=False),
-        })
-        write_file("uuser.php", "on")
-
-    if uuser == "on" and message and text and is_admin:
-        if re.search(r"@|#", text):
-            bot("sendMessage", {
-                "chat_id": chat_id,
-                "text": "حسنا مطوري الشهير \n تم تفعيل الاشتراك بنجاح",
-                "reply_markup": json.dumps({
-                    "inline_keyboard": [[{"text": "اتمام", "callback_data": "bak"}]]
-                }, ensure_ascii=False),
-            })
-            write_file("skor.php", "مفعل ✅")
-            write_file("uuser.php", text)
-        else:
-            bot("sendMessage", {
-                "chat_id": chat_id,
-                "text": "عذرا مطوري الشهير \n قم بأرسال يوزر بصورة صحيحه",
-            })
-
-    if data == "off" and is_admin:
-        if skor != "مفعل ✅":
-            bot("answerCallbackQuery", {
-                "callback_query_id": callback.get("id"),
-                "text": "حالة الاشتراك معطل حالياً",
-                "show_alert": True,
-            })
-        else:
-            bot("editMessageText", {
-                "chat_id": chat_id2, "message_id": message_id,
-                "text": "هل انت متأكد من تعطيل الاشتراك؟",
-                "reply_markup": json.dumps({
-                    "inline_keyboard": [
-                        [{"text": "نعم", "callback_data": "yesde2"},
-                         {"text": "لا", "callback_data": "bak"}],
-                    ]
-                }, ensure_ascii=False),
-            })
-
-    if data == "yesde2" and is_admin:
-        write_file("uuser.php", "")
-        write_file("link.php", "")
-        write_file("skor.php", "معطل ⚠️")
-        bot("editMessageText", {
-            "chat_id": chat_id2, "message_id": message_id,
-            "text": "حسنا مطوري الشهير \n تم تعطيل الاشتراك",
-            "reply_markup": json.dumps({
-                "inline_keyboard": [[{"text": "رجوع", "callback_data": "bak"}]]
-            }, ensure_ascii=False),
-        })
-
-    bloktime = datetime.now().strftime("%I:%M:%S %p")
-
-    if data == "file" and is_admin:
-        path = _full("abbas.json")
-        if os.path.exists(path):
-            with open(path, "rb") as f:
-                bot("sendDocument", {
-                    "chat_id": chat_id2,
-                    "caption": (f" نسخة للمستخدمين  \n"
-                                f" وقت الارسال : ( {bloktime} )\n"
-                                f" عدد المشتركين : ( {all_users} )"),
-                }, files={"document": ("abbas.json", f)})
-
-    if data == "up" and is_admin:
-        bot("editMessageText", {
-            "chat_id": chat_id2, "message_id": message_id,
-            "text": "حسنا مطوري الشهير \n ارسل الملف باسم abbas.json",
-            "reply_markup": json.dumps({
-                "inline_keyboard": [[{"text": "رجوع", "callback_data": "bak"}]]
-            }, ensure_ascii=False),
-        })
-        write_file("up.php", "on")
-
-    if upq_on == "on" and message and message.get("document") and is_admin:
-        doc = message["document"]
-        if doc.get("file_name") == "abbas.json":
-            try:
-                info = bot("getFile", {"file_id": doc["file_id"]})
-                fp = info.get("result", {}).get("file_path")
-                if fp:
-                    url = f"https://api.telegram.org/file/bot{API_KEY}/{fp}"
-                    r = requests.get(url, timeout=60)
-                    with open(_full("abbas.json"), "wb") as f:
-                        f.write(r.content)
-                    bot("sendMessage", {
-                        "chat_id": chat_id,
-                        "text": "* تم رفع الملف : abbas.json *",
-                        "parse_mode": "MarkDown",
-                    })
-                    delete_file("up.php")
-            except Exception as e:
-                bot("sendMessage", {
-                    "chat_id": chat_id,
-                    "text": f"* فشل رفع الملف : {e}*",
-                    "parse_mode": "MarkDown",
-                })
-
-    if data == "pannel" and is_admin:
-        lines = []
-        for i in range(5):
-            idx = len(users) - 2 - i
-            val = users[idx] if idx >= 0 else "-"
-            lines.append(f"▫️ {i+1}- {val}")
-        last5 = "\n".join(lines)
-        bot("editMessageText", {
-            "chat_id": chat_id2, "message_id": message_id,
-            "text": ("*اهلا بك في قسم - الاحصائيات . 📊\n"
-                     "--------------------------\n"
-                     f" عدد اعضاء بوتك : {all_users}\n"
-                     f" المتفاعلين اليوم  : {todayuser}\n"
-                     f" عدد الرسائل المرسله : {stats.get('addmessage', 0)}\n"
-                     f" عدد الرسائل المستلمه : {stats.get('messagee', 0)}\n"
-                     f" مجموع الرسائل : {xll}\n"
-                     "--------------------------\n"
-                     f" اخر خمس مشتركين :\n{last5}\n"
-                     "--------------------------*"),
-            "parse_mode": "MarkDown",
-            "reply_markup": json.dumps({
-                "inline_keyboard": [[{"text": "الصفحه الرئيسيه", "callback_data": "bak"}]]
-            }, ensure_ascii=False),
-        })
-
-    if data == "editstart" and is_admin:
-        bot("editMessageText", {
-            "chat_id": chat_id2, "message_id": message_id,
-            "text": "قم بارسال رسالة الاستارت الان",
-        })
-        write_file("data/q1.txt", "q1")
-
-    if text and text != "/start" and q1 == "q1" and is_admin:
-        write_file("data/q1.txt", "none")
-        write_file("q2.txt", text)
-        bot("sendMessage", {"chat_id": chat_id, "text": "تم التعين بنجاح"})
-
-    if data == "bak" and is_admin:
-        for f in ["msg.php", "forward.php", "midea.php",
-                  "inlin.php", "photoi.php", "up.php"]:
-            delete_file(f)
-        bot("editMessageText", {
-            "chat_id": chat_id2, "message_id": message_id,
-            "text": ADMIN_PANEL_TEXT,
-            "parse_mode": "Markdown",
-            "reply_markup": build_admin_panel(skor),
-        })
-
-    # /start العادي - بدون زر المطور
-    if text == "/start" and not is_admin:
-        default_start = (
-            "• اهلا بك اخي في بوت تحميل من تيك توك 🐿️.\n"
-            "• فقط ارسل الرابط وسيتم ارسال المقطع بدون علامةه مائيةه 🤍.\n"
-            ". — — — — — — — — — — .\n"
-            "• Tele : @C2CCM | @C76XU ."
-        )
-        start_msg = read_file("q2.txt") or default_start
-        bot("sendMessage", {
-            "chat_id": chat_id,
-            "text": start_msg,
-        })
+    # ... (باقي الكود كما هو، مع استبدال جزء تحميل الفيديو فقط) ...
 
     # ============================================================
-    #        🎵 تحميل تيك توك (بدون علامة مائية أولاً)
+    #        🎵 تحميل تيك توك (مع نظام البروكسي)
     # ============================================================
     if text and ("tiktok.com" in text.lower() or "tik" in text.lower()):
         print(f"\n{'='*60}")
@@ -948,7 +399,12 @@ def handle_update(update):
                 bot("editMessageText", {
                     "chat_id": chat_id,
                     "message_id": wait_id,
-                    "text": "❌ تعذر التحميل. جرب رابطاً آخر.",
+                    "text": ("❌ تعذر التحميل.\n\n"
+                             "🔹 الأسباب المحتملة:\n"
+                             "• جميع البروكسيات المجانية فشلت\n"
+                             "• الرابط خاص أو محذوف\n"
+                             "• الإنترنت ضعيف\n\n"
+                             "جرب رابطاً آخر أو أعد المحاولة."),
                 })
             return
 
@@ -957,7 +413,6 @@ def handle_update(update):
         duration = result.get("duration", 0)
         resolution = result.get("resolution", "غير معروف")
 
-        # العنوان + الدقة + التوقيع فقط
         caption = (
             f"📝 العنوان: {result.get('title', 'بدون عنوان')[:150]}\n"
             f"🎞 الدقة: {resolution}\n"
@@ -1014,6 +469,10 @@ def main():
     global last_update_id
     print("🟢 البوت يعمل الآن...")
     print(f"📏 الحد الأقصى: {MAX_FILE_SIZE_MB} MB")
+
+    # بدء نظام تحديث البروكسي في الخلفية
+    start_proxy_updater()
+
     print("اضغط Ctrl+C للإيقاف\n")
 
     while True:
